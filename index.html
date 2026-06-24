@@ -2878,7 +2878,7 @@ function closeOv(id){
       if(c){
         c.itms.forEach(i => {
           let p = DB.prods.find(x => x.id === i.pid);
-          // NO restar stk aquí — se resta al facturar
+          if(p) p.stk -= i.cant; // restar lo que habíamos devuelto al abrir
         });
       }
     }
@@ -2923,8 +2923,8 @@ function rInv(){
   let list=DB.prods.filter(p=>(activeCat==='Todos'||p.cat===activeCat)&&(!q||(p.nom.toLowerCase().includes(q)||p.cod.toLowerCase().includes(q))));
   $('inv-tb').innerHTML=list.length?list.map(p=>{
     let cons=getConsignado(p.id);
-    let existencia=p.stk; // total físico (bodega + consignación)
-    let disponible=Math.max(0,p.stk-cons); // solo bodega (sin lo que está en consignación)
+    let disponible=p.stk; // stock en bodega (ya se descontó al enviar)
+    let existencia=p.stk+cons; // disponible + lo que está en consignación sin vender
     let pct=p.min>0?Math.min(100,Math.round(disponible/p.min*50)):100;
     let lc=disponible<=p.min?'#B03A2E':disponible<=p.min*2?'#8A5A00':'#0A6E5C';
     let mg=p.cos>0?((p.pre-p.cos)/p.pre*100).toFixed(0):null;
@@ -2932,9 +2932,9 @@ function rInv(){
       <td class="mono">${p.cod}</td>
       <td><div style="font-weight:500">${p.nom}</div>${p.ubi?`<div style="font-size:11px;color:var(--text3)">${p.ubi}</div>`:''}</td>
       <td><span class="badge bt">${p.cat}</span></td>
-      <td class="mono" title="Existencia total: bodega + consignación sin facturar">
+      <td class="mono" title="Stock en bodega + unidades en consignación sin vender">
         <span style="font-weight:600;color:var(--blue)">${existencia}</span> ${p.uni}
-        ${cons>0?`<div style="font-size:10px;color:var(--text3)">${cons} en consig. · ${disponible} disp.</div>`:''}
+        ${cons>0?`<div style="font-size:10px;color:var(--text3)">${cons} en consig.</div>`:''}
       </td>
       <td>
         ${disponible} ${p.uni}
@@ -3732,7 +3732,11 @@ function editConEnvio(id){
   let c = DB.consignaciones.find(x => x.id === id);
   if(!c){ toast('Consignación no encontrada'); return; }
 
-  // Stock NO se toca al editar (se maneja al facturar)
+  // Devolver stock al inventario antes de editar
+  c.itms.forEach(i => {
+    let p = DB.prods.find(x => x.id === i.pid);
+    if(p) p.stk += i.cant; // devolver la cantidad enviada
+  });
 
   // Cargar items en DB.conitms para editar
   DB.conitms = c.itms.map(i => ({
@@ -3785,7 +3789,7 @@ function addConItm(){
   let cant=parseInt($('con-cant').value)||1;
   let p=DB.prods.find(x=>x.id===pid);
   if(!p){toast('Selecciona un producto',false);return}
-  let dispCon=Math.max(0,p.stk-getConsignado(p.id));if(cant>dispCon){toast(`Disponible en bodega: ${dispCon}`,false);return}
+  if(cant>p.stk){toast(`Stock insuficiente. Disponible: ${p.stk}`,false);return}
   let ex=DB.conitms.find(i=>i.pid===pid);
   if(ex){ex.cant+=cant}
   else{DB.conitms.push({pid:p.id,nom:p.nom,uni:p.uni,cant,pre:p.pre,cos:p.cos})}
@@ -3804,7 +3808,11 @@ function saveConEnvio(){
     let c = DB.consignaciones.find(x => x.id === DB.editConId);
     if(!c){ toast('Error: consignación no encontrada'); return; }
 
-    // NO tocar stk — se resta al facturar
+    // Descontar nuevo stock
+    DB.conitms.forEach(i=>{
+      let p=DB.prods.find(x=>x.id===i.pid);
+      if(p) p.stk=Math.max(0,p.stk-i.cant);
+    });
 
     // Actualizar datos preservando vendido/facturado por producto
     c.itms = DB.conitms.map(ni => {
@@ -3823,7 +3831,11 @@ function saveConEnvio(){
     rCons();rInv();rDash();rReportes();saveDB();
     toast(`Consignación CSG-${c.num} actualizada ✓`);
   } else {
-    // MODO NUEVO — NO tocar stk, se resta al facturar
+    // MODO NUEVO
+    DB.conitms.forEach(i=>{
+      let p=DB.prods.find(x=>x.id===i.pid);
+      if(p) p.stk=Math.max(0,p.stk-i.cant);
+    });
     let envio={
       id:Date.now(),num:DB.nconsig++,
       cliId,cli:cli.nom+(cli.emp?' — '+cli.emp:''),
@@ -3835,7 +3847,7 @@ function saveConEnvio(){
     DB.consignaciones.push(envio);
     closeOv('ov-con-envio');
     rCons();rInv();rDash();rReportes();saveDB();
-    toast(`Envío CSG-${envio.num} creado ✓`);
+    toast(`Envío CSG-${envio.num} creado — stock descontado ✓`);
   }
 }
 
@@ -3922,11 +3934,6 @@ function procConVenta(){
     facItems.push({pid:i.pid,cod:i.cod||'',nom:i.nom,c:cant,pre:i.pre,cos:i.cos||0});
   });
   if(!facItems.length){toast('Ingresa al menos una cantidad',false);return}
-  // Restar stk al facturar
-  facItems.forEach(i=>{
-    let p=DB.prods.find(x=>x.id===i.pid);
-    if(p) p.stk=Math.max(0,p.stk-i.c);
-  });
   let cli=DB.clientes.find(x=>x.id===c.cliId)||{nom:c.cli,id:c.cliId,ruc:'',tel:'',dir:''};
   let sub=facItems.reduce((a,i)=>a+i.c*i.pre,0);
   let tax=sub*0.07;
@@ -4955,6 +4962,15 @@ function cmpGuardarReporte(){
   cmpRecalc(); cmpRenderHist();
 }
 
+function cmpGetConsignado(prodId){
+  // Units out on active consignment (not yet invoiced) = part of existencia
+  return (DB.consignaciones||[]).filter(c=>c.estado!=='Cerrado').reduce((a,c)=>{
+    const itm=c.itms.find(i=>String(i.pid)===String(prodId));
+    if(!itm) return a;
+    return a+(itm.cant-(itm.vendido||0));
+  },0);
+}
+
 function cmpGetStockTienda(prodId, cliId){
   // Stock tienda = total enviado (facturas/consignaciones) - total vendido (reportes acumulados)
   let enviado = 0;
@@ -5027,8 +5043,8 @@ function cmpRecalc(){
     const stockEllos = cliList.reduce((a,c)=>a+cmpGetStockTienda(p.id,c.id),0);
     // Months until they run out
     const mesesEllos = avgVentas>0 ? stockEllos/avgVentas : 99;
-    // Mi existencia (físico total: bodega + consignación sin facturar)
-    const miStock = p.stk||0;
+    // Existencia = stk (bodega) + consignado sin facturar
+    const miStock = (p.stk||0) + cmpGetConsignado(p.id);
     const transito = cmpGetOrdenesEnTransito(p.id);
     // When they run out I need to replenish them — do I have stock to do it?
     // And do I need to order from supplier now (lead time 3.5 months)?
