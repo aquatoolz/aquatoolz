@@ -4180,7 +4180,9 @@ function saveDB(){
       updated: ts
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    window._lastLocalSave = ts;
   }catch(e){console.warn('No se pudo guardar:',e)}
+  if(typeof pushToCloud === 'function') pushToCloud();
 }
 
 function loadDB(){
@@ -5513,6 +5515,7 @@ async function initCloudSync(){
 }
 
 async function pullFromCloud(isInit){
+  // Never pull while a push is in progress — avoids overwriting fresh local data
   if(isPushing) return;
   try {
     const res = await fetch(FIREBASE_URL + DB_PATH);
@@ -5520,25 +5523,18 @@ async function pullFromCloud(isInit){
     const data = await res.json();
     if(!data) { await pushToCloud(); return; }
     const h = String(data.updated);
-    if(h === lastSyncHash) return; // no change
-
-    // CRITICAL: only load from cloud if cloud is strictly newer than local
-    const localRaw = localStorage.getItem(STORAGE_KEY);
-    if(localRaw){
-      try{
-        const localData = JSON.parse(localRaw);
-        const localTs = localData.updated || 0;
-        if(data.updated && data.updated <= localTs){
-          // Local is same or newer — push local to cloud instead
-          lastSyncHash = h; // mark as seen so we don't loop
-          await pushToCloud();
-          return;
-        }
-      }catch(e){}
+    // Only load if cloud data is NEWER than what we last pushed
+    if(h !== lastSyncHash){
+      // If we have local data that is newer, don't overwrite it
+      const localRaw = localStorage.getItem(STORAGE_KEY);
+      if(!isInit && localRaw){
+        // Compare timestamps: only load cloud if it's strictly newer than local save
+        // We track lastLocalSave to know when we last wrote locally
+        if(window._lastLocalSave && data.updated <= window._lastLocalSave) return;
+      }
+      lastSyncHash = h;
+      loadFromCloud(data);
     }
-
-    lastSyncHash = h;
-    loadFromCloud(data);
   } catch(e){ /* silent */ }
 }
 
@@ -5571,13 +5567,7 @@ async function pushToCloud(){
   }
 }
 
-// Override saveDB to also push to cloud
-const _origSaveDB = saveDB;
-function saveDB(){
-  window._lastLocalSave = Date.now();
-  _origSaveDB();
-  pushToCloud();
-}
+
 </script>
 <script>
 if('serviceWorker' in navigator){
