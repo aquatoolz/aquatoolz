@@ -3660,7 +3660,7 @@ function rReportes(){
       <td><span class="badge ${badge}">${label}</span></td>
     </tr>`;
   }).join('');
-  let totDisp  = DB.prods.reduce((a,p)=>a+Math.max(0,p.stk-getConsignado(p.id)),0);
+  let totDisp  = DB.prods.reduce((a,p)=>a+p.stk,0);
   let totCons  = DB.prods.reduce((a,p)=>a+(consPend[p.id]||0),0);
   let totExist = totDisp+totCons;
   let totValCos= DB.prods.reduce((a,p)=>a+(p.stk+(consPend[p.id]||0))*p.cos,0);
@@ -4962,15 +4962,6 @@ function cmpGuardarReporte(){
   cmpRecalc(); cmpRenderHist();
 }
 
-function cmpGetConsignado(prodId){
-  // Units out on active consignment (not yet invoiced) = part of existencia
-  return (DB.consignaciones||[]).filter(c=>c.estado!=='Cerrado').reduce((a,c)=>{
-    const itm=c.itms.find(i=>String(i.pid)===String(prodId));
-    if(!itm) return a;
-    return a+(itm.cant-(itm.vendido||0));
-  },0);
-}
-
 function cmpGetStockTienda(prodId, cliId){
   // Stock tienda = total enviado (facturas/consignaciones) - total vendido (reportes acumulados)
   let enviado = 0;
@@ -5043,8 +5034,8 @@ function cmpRecalc(){
     const stockEllos = cliList.reduce((a,c)=>a+cmpGetStockTienda(p.id,c.id),0);
     // Months until they run out
     const mesesEllos = avgVentas>0 ? stockEllos/avgVentas : 99;
-    // Existencia = stk (bodega) + consignado sin facturar
-    const miStock = (p.stk||0) + cmpGetConsignado(p.id);
+    // My stock in bodega
+    const miStock = p.stk||0;
     const transito = cmpGetOrdenesEnTransito(p.id);
     // When they run out I need to replenish them — do I have stock to do it?
     // And do I need to order from supplier now (lead time 3.5 months)?
@@ -5499,6 +5490,9 @@ function loadFromCloud(data){
   rDash();rInv();rClis();rProvs();rGastos();
 }
 
+let isPushing = false;
+let pendingPush = false;
+
 async function initCloudSync(){
   const statusEl = document.getElementById('sync-status');
   statusEl.textContent = '🔄 Conectando...';
@@ -5507,8 +5501,8 @@ async function initCloudSync(){
     return;
   }
   try {
-    await pullFromCloud();
-    syncInterval = setInterval(pullFromCloud, 10000);
+    await pullFromCloud(true); // initial load only
+    syncInterval = setInterval(pullFromCloud, 15000);
     statusEl.textContent = '🟢 En línea';
   } catch(e){
     console.warn('Sync init failed:', e);
@@ -5516,14 +5510,24 @@ async function initCloudSync(){
   }
 }
 
-async function pullFromCloud(){
+async function pullFromCloud(isInit){
+  // Never pull while a push is in progress — avoids overwriting fresh local data
+  if(isPushing) return;
   try {
     const res = await fetch(FIREBASE_URL + DB_PATH);
     if(!res.ok) return;
     const data = await res.json();
     if(!data) { await pushToCloud(); return; }
     const h = String(data.updated);
+    // Only load if cloud data is NEWER than what we last pushed
     if(h !== lastSyncHash){
+      // If we have local data that is newer, don't overwrite it
+      const localRaw = localStorage.getItem(STORAGE_KEY);
+      if(!isInit && localRaw){
+        // Compare timestamps: only load cloud if it's strictly newer than local save
+        // We track lastLocalSave to know when we last wrote locally
+        if(window._lastLocalSave && data.updated <= window._lastLocalSave) return;
+      }
       lastSyncHash = h;
       loadFromCloud(data);
     }
@@ -5532,19 +5536,37 @@ async function pullFromCloud(){
 
 async function pushToCloud(){
   if(!FIREBASE_URL || FIREBASE_URL.includes('TU_URL')) return;
+  if(isPushing){ pendingPush = true; return; }
+  isPushing = true;
+  const statusEl = document.getElementById('sync-status');
   try {
-    await fetch(FIREBASE_URL + DB_PATH, {
+    const payload = getDBData();
+    const res = await fetch(FIREBASE_URL + DB_PATH, {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(getDBData())
+      body: JSON.stringify(payload)
     });
-    lastSyncHash = String(Date.now());
-  } catch(e){ console.warn('Push failed:', e); }
+    if(!res.ok){
+      console.warn('Push HTTP error:', res.status);
+      if(statusEl) statusEl.textContent = '🔴 Error al guardar';
+    } else {
+      lastSyncHash = String(payload.updated);
+      window._lastLocalSave = payload.updated;
+      if(statusEl) statusEl.textContent = '🟢 En línea';
+    }
+  } catch(e){
+    console.warn('Push failed:', e);
+    if(statusEl) statusEl.textContent = '🔴 Sin conexión';
+  } finally {
+    isPushing = false;
+    if(pendingPush){ pendingPush = false; pushToCloud(); }
+  }
 }
 
 // Override saveDB to also push to cloud
 const _origSaveDB = saveDB;
 function saveDB(){
+  window._lastLocalSave = Date.now();
   _origSaveDB();
   pushToCloud();
 }
