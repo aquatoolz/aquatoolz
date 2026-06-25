@@ -5515,7 +5515,6 @@ async function initCloudSync(){
 }
 
 async function pullFromCloud(isInit){
-  // Never pull while a push is in progress — avoids overwriting fresh local data
   if(isPushing) return;
   try {
     const res = await fetch(FIREBASE_URL + DB_PATH);
@@ -5523,18 +5522,22 @@ async function pullFromCloud(isInit){
     const data = await res.json();
     if(!data) { await pushToCloud(); return; }
     const h = String(data.updated);
-    // Only load if cloud data is NEWER than what we last pushed
-    if(h !== lastSyncHash){
-      // If we have local data that is newer, don't overwrite it
+    if(h === lastSyncHash) return;
+    // Only load from cloud if cloud data is strictly newer than local
+    try {
       const localRaw = localStorage.getItem(STORAGE_KEY);
-      if(!isInit && localRaw){
-        // Compare timestamps: only load cloud if it's strictly newer than local save
-        // We track lastLocalSave to know when we last wrote locally
-        if(window._lastLocalSave && data.updated <= window._lastLocalSave) return;
+      if(localRaw){
+        const localData = JSON.parse(localRaw);
+        const localTs = localData.updated || 0;
+        if(data.updated && data.updated <= localTs){
+          lastSyncHash = h;
+          pushToCloud(); // push local up to cloud
+          return;
+        }
       }
-      lastSyncHash = h;
-      loadFromCloud(data);
-    }
+    } catch(e){}
+    lastSyncHash = h;
+    loadFromCloud(data);
   } catch(e){ /* silent */ }
 }
 
