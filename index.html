@@ -5467,16 +5467,26 @@ document.addEventListener('DOMContentLoaded', function(){
 
 /* ===== CLOUD SYNC via JSONBin ===== */
 function getDBData(){
+  const ts = Date.now();
   return {
     clientes:DB.clientes, proveedores:DB.proveedores, prods:DB.prods,
     ventas:DB.ventas, facts:DB.facts, pedidos:DB.pedidos, ordenes:DB.ordenes,
     gastos:DB.gastos, consignaciones:DB.consignaciones, cmpReportes:DB.cmpReportes||[],
     nf:DB.nf, nped:DB.nped, nord:DB.nord, nconsig:DB.nconsig,
-    updated: Date.now()
+    updated: ts
   };
 }
 
 function loadFromCloud(data){
+  // NEVER load from cloud if local data is same age or newer
+  try {
+    const localRaw = localStorage.getItem(STORAGE_KEY);
+    if(localRaw){
+      const localData = JSON.parse(localRaw);
+      const localTs = localData.updated || 0;
+      if(data.updated && data.updated <= localTs) return;
+    }
+  } catch(e){}
   if(data.clientes) DB.clientes=data.clientes;
   if(data.proveedores) DB.proveedores=data.proveedores;
   if(data.prods) DB.prods=data.prods;
@@ -5496,6 +5506,16 @@ function loadFromCloud(data){
 
 let isPushing = false;
 let pendingPush = false;
+let unsavedChanges = false;
+
+// Block closing the tab until Firebase confirms
+window.addEventListener('beforeunload', function(e){
+  if(unsavedChanges){
+    e.preventDefault();
+    e.returnValue = 'Hay cambios sin guardar en la nube. ¿Seguro que quieres salir?';
+    return e.returnValue;
+  }
+});
 
 async function initCloudSync(){
   const statusEl = document.getElementById('sync-status');
@@ -5505,8 +5525,8 @@ async function initCloudSync(){
     return;
   }
   try {
-    await pullFromCloud(true); // initial load only
-    syncInterval = setInterval(pullFromCloud, 15000);
+    await pullFromCloud();
+    syncInterval = setInterval(pullFromCloud, 30000);
     statusEl.textContent = '🟢 En línea';
   } catch(e){
     console.warn('Sync init failed:', e);
@@ -5514,7 +5534,7 @@ async function initCloudSync(){
   }
 }
 
-async function pullFromCloud(isInit){
+async function pullFromCloud(){
   if(isPushing) return;
   try {
     const res = await fetch(FIREBASE_URL + DB_PATH);
@@ -5523,19 +5543,6 @@ async function pullFromCloud(isInit){
     if(!data) { await pushToCloud(); return; }
     const h = String(data.updated);
     if(h === lastSyncHash) return;
-    // Only load from cloud if cloud data is strictly newer than local
-    try {
-      const localRaw = localStorage.getItem(STORAGE_KEY);
-      if(localRaw){
-        const localData = JSON.parse(localRaw);
-        const localTs = localData.updated || 0;
-        if(data.updated && data.updated <= localTs){
-          lastSyncHash = h;
-          pushToCloud(); // push local up to cloud
-          return;
-        }
-      }
-    } catch(e){}
     lastSyncHash = h;
     loadFromCloud(data);
   } catch(e){ /* silent */ }
@@ -5545,7 +5552,9 @@ async function pushToCloud(){
   if(!FIREBASE_URL || FIREBASE_URL.includes('TU_URL')) return;
   if(isPushing){ pendingPush = true; return; }
   isPushing = true;
+  unsavedChanges = true;
   const statusEl = document.getElementById('sync-status');
+  if(statusEl) statusEl.textContent = '🔄 Guardando...';
   try {
     const payload = getDBData();
     const res = await fetch(FIREBASE_URL + DB_PATH, {
@@ -5556,14 +5565,16 @@ async function pushToCloud(){
     if(!res.ok){
       console.warn('Push HTTP error:', res.status);
       if(statusEl) statusEl.textContent = '🔴 Error al guardar';
+      // unsavedChanges stays true — block closing
     } else {
       lastSyncHash = String(payload.updated);
-      window._lastLocalSave = payload.updated;
+      unsavedChanges = false;
       if(statusEl) statusEl.textContent = '🟢 En línea';
     }
   } catch(e){
     console.warn('Push failed:', e);
     if(statusEl) statusEl.textContent = '🔴 Sin conexión';
+    // unsavedChanges stays true — block closing
   } finally {
     isPushing = false;
     if(pendingPush){ pendingPush = false; pushToCloud(); }
